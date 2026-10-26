@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nuzlocke Helper</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c1f24; --muted:#6a7280; --line:#e3e6ea; --accent:#d6402f; --ok:#2e8b57; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161a; --card:#1d2025; --text:#e8eaed; --muted:#98a0ac; --line:#2c3037; --accent:#ef5a48; --ok:#4cc38a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:760px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { margin:0 0 4px; } h2 { margin:28px 0 12px; font-size:1.1rem; }
+  .sub { color:var(--muted); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:10px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .grow { flex:1; min-width:120px; }
+  input, select, button { font:inherit; padding:7px 10px; border-radius:7px; border:1px solid var(--line); background:var(--card); color:var(--text); }
+  button { cursor:pointer; } button:hover:not(:disabled) { border-color:var(--accent); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:var(--accent); }
+  .badge { font-size:.75rem; padding:2px 8px; border-radius:99px; border:1px solid var(--line); color:var(--muted); }
+  .badge.on { color:var(--ok); border-color:var(--ok); }
+  .muted { color:var(--muted); font-size:.9rem; }
+  #error { display:none; background:var(--accent); color:#fff; padding:10px 14px; border-radius:8px; margin-bottom:14px; }
+  .table-wrap { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-size:.92rem; }
+  th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  tr.dead td:first-child, tr.dead td:nth-child(2) { text-decoration:line-through; color:var(--muted); }
+  .party { display:flex; gap:8px; flex-wrap:wrap; }
+  .slot { flex:1 1 100px; min-height:46px; border:1px dashed var(--line); border-radius:8px; padding:6px 10px; font-size:.9rem; }
+  .slot.filled { border-style:solid; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Nuzlocke Helper</h1>
+  <p class="sub">Track your runs, catches and casualties.</p>
+  <div id="error" role="alert"></div>
+
+  <!-- Runs list view -->
+  <section id="runs-view">
+    <form id="run-form" class="card row">
+      <input class="grow" name="name" placeholder="Run name" required maxlength="100">
+      <input class="grow" name="game" placeholder="Game (e.g. Emerald)" required maxlength="100">
+      <button class="primary">Start run</button>
+    </form>
+    <h2>Your runs</h2>
+    <div id="runs"></div>
+  </section>
+
+  <!-- Run detail view -->
+  <section id="detail-view" hidden>
+    <button data-action="back">&larr; All runs</button>
+    <h2 id="detail-title"></h2>
+    <div class="party" id="party"></div>
+
+    <h2>Add encounter</h2>
+    <form id="enc-form" class="card row">
+      <input class="grow" name="area" placeholder="Area" required>
+      <input class="grow" name="species" placeholder="Species" required>
+      <input class="grow" name="nickname" placeholder="Nickname">
+      <select name="status">
+        <option value="caught">Caught</option>
+        <option value="failed">Failed</option>
+
+        <!--
+        <option value="fled">Fled</option>
+        -->
+
+      </select>
+      <label class="muted"><input type="checkbox" name="in_party"> In party</label>
+      <button class="primary">Add</button>
+    </form>
+
+    <h2>Encounters</h2>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>Area</th><th>Pok&eacute;mon</th><th>Status</th><th></th></tr></thead>
+      <tbody id="encounters"></tbody>
+    </table></div>
+  </section>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+let currentRun = null;
+
+async function api(path, { method = "GET", body } = {}) {
+  const res = await fetch(path, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    let msg = `${res.status} ${res.statusText}`;
+    try {
+      const d = (await res.json()).detail;
+      msg = typeof d === "string" ? d : d.map((e) => e.msg).join("; ");
+    } catch {}
+    throw new Error(msg);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+// Run an action; show any API error (404/409/422...) in the banner
+async function act(fn) {
+  const box = $("#error");
+  box.style.display = "none";
+  try { await fn(); } catch (e) {
+    box.textContent = e.message;
+    box.style.display = "block";
+  }
+}
+
+async function loadRuns() {
+  const runs = await api("/runs");
+  $("#runs").innerHTML = runs.length ? runs.map((r) => `
+    <div class="card row">
+      <div class="grow">
+        <strong>${esc(r.name)}</strong> <span class="badge ${r.is_active ? "on" : ""}">${r.is_active ? "active" : "ended"}</span>
+        <div class="muted">${esc(r.game)} &middot; started ${new Date(r.created_at).toLocaleDateString()}</div>
+      </div>
+      <button data-action="open" data-id="${r.id}">Open</button>
+      <button data-action="toggle-run" data-id="${r.id}" data-active="${r.is_active}">${r.is_active ? "End" : "Resume"}</button>
+      <button class="danger" data-action="delete-run" data-id="${r.id}">Delete</button>
+    </div>`).join("") : `<p class="muted">No runs yet. Start one above.</p>`;
+}
+
+async function loadDetail() {
+  const [run, encs] = await Promise.all([
+    api(`/runs/${currentRun}`), api(`/runs/${currentRun}/encounters`),
+  ]);
+  $("#detail-title").textContent = `${run.name} (${run.game})`;
+  const party = encs.filter((e) => e.in_party);
+  $("#party").innerHTML = Array.from({ length: 6 }, (_, i) => {
+    const p = party[i];
+    return p ? `<div class="slot filled"><strong>${esc(p.nickname || p.species)}</strong><br><span class="muted">${esc(p.species)}</span></div>`
+             : `<div class="slot muted">Empty</div>`;
+  }).join("");
+  $("#encounters").innerHTML = encs.length ? encs.map((e) => `
+    <tr class="${e.is_alive ? "" : "dead"}">
+      <td>${esc(e.area)}</td>
+      <td>${esc(e.species)}${e.nickname ? ` "${esc(e.nickname)}"` : ""}</td>
+      <td>${esc(e.status)}${e.status === "caught" && !e.is_alive ? " (dead)" : ""}</td>
+      <td>
+        ${e.status === "caught" ? `
+          <button data-action="party" data-id="${e.id}" data-on="${e.in_party}" ${e.is_alive ? "" : "disabled"}>${e.in_party ? "Bench" : "Party"}</button>
+          <button data-action="alive" data-id="${e.id}" data-on="${e.is_alive}">${e.is_alive ? "Mark dead" : "Revive"}</button>` : ""}
+        <button class="danger" data-action="delete-enc" data-id="${e.id}">&times;</button>
+      </td>
+    </tr>`).join("") : `<tr><td colspan="4" class="muted">No encounters yet.</td></tr>`;
+}
+
+function show(view) {
+  $("#runs-view").hidden = view !== "runs";
+  $("#detail-view").hidden = view !== "detail";
+}
+
+// Forms
+$("#run-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const f = ev.target;
+  act(async () => {
+    await api("/runs", { method: "POST", body: { name: f.name.value, game: f.game.value } });
+    f.reset();
+    await loadRuns();
+  });
+});
+
+$("#enc-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const f = ev.target;
+  act(async () => {
+    await api(`/runs/${currentRun}/encounters`, { method: "POST", body: {
+      area: f.area.value, species: f.species.value,
+      nickname: f.nickname.value || null, status: f.status.value, in_party: f.in_party.checked,
+    }});
+    f.reset();
+    await loadDetail();
+  });
+});
+
+// All buttons use event delegation via data-action
+document.addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button[data-action]");
+  if (!btn) return;
+  const { action, id, on, active } = btn.dataset;
+  const enc = `/runs/${currentRun}/encounters/${id}`;
+  act(async () => {
+    if (action === "open") { currentRun = id; await loadDetail(); show("detail"); }
+    else if (action === "back") { currentRun = null; show("runs"); await loadRuns(); }
+    else if (action === "toggle-run") { await api(`/runs/${id}`, { method: "PATCH", body: { is_active: active !== "true" } }); await loadRuns(); }
+    else if (action === "delete-run") { if (confirm("Delete this run and all its encounters?")) { await api(`/runs/${id}`, { method: "DELETE" }); await loadRuns(); } }
+    else if (action === "party") { await api(enc, { method: "PATCH", body: { in_party: on !== "true" } }); await loadDetail(); }
+    else if (action === "alive") { await api(enc, { method: "PATCH", body: { is_alive: on !== "true" } }); await loadDetail(); }
+    else if (action === "delete-enc") { await api(enc, { method: "DELETE" }); await loadDetail(); }
+  });
+});
+
+act(loadRuns);
+</script>
+</body>
+</html>

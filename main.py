@@ -1,19 +1,21 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 from sqlmodel import Field, Relationship, Session, SQLModel, create_engine, select
 
-MAX_PARTY_SIZE = 6
+MAX_PARTY_SIZE = 6 #add custom party size rules later
 
 # --- Database setup ---------------------------------------------------------
 
 engine = create_engine(
     "sqlite:///nuzlocke.db",
-    connect_args={"check_same_thread": False},  # needed for SQLite + FastAPI
+    connect_args={"check_same_thread": False},
 )
 
 
@@ -71,7 +73,7 @@ class RunUpdate(SQLModel):
 class EncounterStatus(str, Enum):
     caught = "caught"
     failed = "failed"
-    fled = "fled"
+    #fled = "fled"
 
 
 class EncounterBase(SQLModel):
@@ -123,7 +125,7 @@ def get_run_or_404(session: Session, run_id: int) -> Run:
 def get_encounter_or_404(session: Session, run_id: int, encounter_id: int) -> Encounter:
     get_run_or_404(session, run_id)
     enc = session.get(Encounter, encounter_id)
-    # Must belong to THIS run, otherwise /runs/1/encounters/5 could leak run 2's data
+    # Same-run sanity check
     if not enc or enc.run_id != run_id:
         raise HTTPException(status_code=404, detail="Encounter not found")
     return enc
@@ -132,7 +134,7 @@ def get_encounter_or_404(session: Session, run_id: int, encounter_id: int) -> En
 def ensure_area_is_free(
     session: Session, run_id: int, area: str, exclude_id: Optional[int] = None
 ):
-    """Rule: one encounter per area per run (case-insensitive)."""
+    """Rule: one encounter per area per run"""
     query = select(Encounter).where(
         Encounter.run_id == run_id,
         func.lower(Encounter.area) == area.strip().lower(),
@@ -187,11 +189,6 @@ def resolve_party_flag(
 app = FastAPI(title="Nuzlocke Helper", lifespan=lifespan)
 
 
-@app.get("/")
-def root():
-    return {"status": "ok"}
-
-
 @app.post("/runs", response_model=RunRead, status_code=status.HTTP_201_CREATED)
 def create_run(data: RunCreate, session: Session = Depends(get_session)):
     run = Run.model_validate(data)
@@ -232,12 +229,11 @@ def update_run(run_id: int, data: RunUpdate, session: Session = Depends(get_sess
 @app.delete("/runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_run(run_id: int, session: Session = Depends(get_session)):
     run = get_run_or_404(session, run_id)
-    session.delete(run)  # cascades to its encounters
+    session.delete(run)  # cascades to encounters
     session.commit()
 
 
 # --- Encounter routes (nested under a run) ----------------------------------
-
 
 @app.post(
     "/runs/{run_id}/encounters",
@@ -337,3 +333,14 @@ def delete_encounter(
     enc = get_encounter_or_404(session, run_id, encounter_id)
     session.delete(enc)
     session.commit()
+
+
+
+
+# ---------------------
+# --- UI --------------
+app.mount(
+    "/",
+    StaticFiles(directory=Path(__file__).parent / "static", html=True),
+    name="static",
+)
